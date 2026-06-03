@@ -1,0 +1,7 @@
+inpackage: True
+dir: mocks
+pkgname: mockss
+packages:
+  github.com/zeiss/prompts:
+    config:
+      all: True
