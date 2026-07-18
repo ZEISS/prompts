@@ -14,6 +14,7 @@ tool (
 require (
 	github.com/google/go-querystring v1.2.0
 	github.com/katallaxie/pkg v0.7.11
+	github.com/nats-io/nats.go v1.52.0
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -336,6 +337,8 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nakabonne/nestif v0.3.1 // indirect
+	github.com/nats-io/nkeys v0.4.15 // indirect
+	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/nishanths/exhaustive v0.12.0 // indirect
 	github.com/nishanths/predeclared v0.2.2 // indirect
 	github.com/nunnatsa/ginkgolinter v0.19.1 // indirect

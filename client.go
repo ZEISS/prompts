@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"iter"
 	"maps"
 	"net/http"
 	"net/url"
@@ -35,6 +36,8 @@ type Doer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
+var _ Promptable = (*Client)(nil)
+
 // Client is a struct for sending HTTP requests. It holds the http Client and
 // the response decoder.
 type Client struct {
@@ -52,16 +55,22 @@ type Client struct {
 	bodyProvider BodyProvider
 	// response decoder
 	responseDecoder ResponseDecoder
+	// completion decoder
+	completionDecoder CompletionDecoder
+	// completion chunks decoder
+	completionChunksDecoder CompletionChunksDecoder
 }
 
 // NewClient returns a new Client with an http DefaultClient.
 func NewClient(url ...string) *Client {
 	c := &Client{
-		httpClient:      DefaultClient,
-		method:          http.MethodGet,
-		header:          make(http.Header),
-		queryStructs:    make([]any, 0),
-		responseDecoder: jsonDecoder{},
+		httpClient:              DefaultClient,
+		method:                  http.MethodGet,
+		header:                  make(http.Header),
+		queryStructs:            make([]any, 0),
+		bodyProvider:            jsonBodyProvider{},
+		completionDecoder:       responsesCompatibilityDecoder{},
+		completionChunksDecoder: responsesCompatibilityChunksDecoder{},
 	}
 
 	if slices.GreaterThen(0, url) {
@@ -89,13 +98,14 @@ func (s *Client) New() *Client {
 	maps.Copy(headerCopy, s.header)
 
 	return &Client{
-		httpClient:      s.httpClient,
-		method:          s.method,
-		rawURL:          s.rawURL,
-		header:          headerCopy,
-		queryStructs:    append([]any{}, s.queryStructs...),
-		bodyProvider:    s.bodyProvider,
-		responseDecoder: s.responseDecoder,
+		httpClient:              s.httpClient,
+		method:                  s.method,
+		rawURL:                  s.rawURL,
+		header:                  headerCopy,
+		queryStructs:            append([]any{}, s.queryStructs...),
+		bodyProvider:            s.bodyProvider,
+		completionDecoder:       s.completionDecoder,
+		completionChunksDecoder: s.completionChunksDecoder,
 	}
 }
 
@@ -366,6 +376,28 @@ func addHeaders(req *http.Request, header http.Header) {
 	}
 }
 
+// CompletionDecoder sets the Client's completion decoder.
+func (s *Client) CompletionDecoder(decoder CompletionDecoder) *Client {
+	if decoder == nil {
+		return s
+	}
+
+	s.completionDecoder = decoder
+
+	return s
+}
+
+// CompletionChunksDecoder sets the Client's completion chunks decoder.
+func (s *Client) CompletionChunksDecoder(decoder CompletionChunksDecoder) *Client {
+	if decoder == nil {
+		return s
+	}
+
+	s.completionChunksDecoder = decoder
+
+	return s
+}
+
 // ResponseDecoder sets the Client's response decoder.
 func (s *Client) ResponseDecoder(decoder ResponseDecoder) *Client {
 	if decoder == nil {
@@ -375,6 +407,57 @@ func (s *Client) ResponseDecoder(decoder ResponseDecoder) *Client {
 	s.responseDecoder = decoder
 
 	return s
+}
+
+// Complete is completing the request with the decoder set by completionDecoder.
+func (s *Client) Complete(ctx context.Context, prompt *Prompt) (*Completion, error) {
+	req, err := s.BodyJSON(prompt).Request(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	completion, err := s.completionDecoder.Decode(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return completion, nil
+}
+
+// CompleteChunked is completing the request with the decoder set by completionDecoder.
+// It returns a channel that will receive the completion chunks as they are received.
+func (s *Client) CompleteChunked(ctx context.Context, prompt *Prompt) iter.Seq2[*CompletionChunk, error] {
+	return func(yield func(*CompletionChunk, error) bool) {
+		req, err := s.BodyJSON(prompt).Request(ctx)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		defer resp.Body.Close()
+
+		for chunk, err := range s.completionChunksDecoder.Decode(resp) {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+
+			if !yield(chunk, nil) {
+				return
+			}
+		}
+	}
 }
 
 // ReceiveSuccess creates a new HTTP request and returns the response. Success

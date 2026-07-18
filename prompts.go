@@ -4,7 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 )
+
+// Promptable is an interface that enables to prompt a model and receive a completion.
+type Promptable interface {
+	// Complete sends a prompt and returns the completion.
+	Complete(ctx context.Context, prompt *Prompt) (*Completion, error)
+	// CompleteChunked sends a prompt and returns a stream of completion events.
+	CompleteChunked(ctx context.Context, prompt *Prompt) iter.Seq2[*CompletionChunk, error]
+}
 
 // ErrNotImplemented is returned when a method is not implemented.
 var ErrNotImplemented = fmt.Errorf("prompts: not implemented")
@@ -48,27 +57,4 @@ func (e *PromptError) UnmarshalJSON(data []byte) error {
 	e.Param = err.Error.Param
 
 	return nil
-}
-
-// Promptable is an interface that enables to send a prompt.
-type Promptable interface {
-	// Do completes a prompt and returns the completion.
-	Do(ctx context.Context, prompt *Prompt) (*Completion, error)
-	// AsStream completes a prompt and returns the completion as a stream.
-	AsStream(ctx context.Context, prompt *Prompt, stream CompletionEventStream) error
-}
-
-var _ Promptable = &Unimplemented{}
-
-// Unimplemented is an unimplemented Promptable.
-type Unimplemented struct{}
-
-// Complete is an unimplemented method.
-func (u *Unimplemented) Do(_ context.Context, _ *Prompt) (*Completion, error) {
-	return nil, ErrNotImplemented
-}
-
-// AsStream is an unimplemented method.
-func (u *Unimplemented) AsStream(_ context.Context, _ *Prompt, _ CompletionEventStream) error {
-	return ErrNotImplemented
 }

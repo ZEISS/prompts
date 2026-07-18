@@ -5,12 +5,45 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
+	"iter"
 	"net/http"
 
 	"github.com/katallaxie/pkg/conv"
 	"github.com/katallaxie/pkg/slices"
 )
+
+const (
+	// EventResponseStreamed is an event type that indicates that the response has been created.
+	EventResponseCreated = "response.created"
+	// EventResponseCompleted is an event type that indicates that the response has been completed.
+	EventResponseCompleted = "respone.completed"
+	// EventResponseFailed is an event type that indicates that the response has failed.
+	EventResponseFailed = "response.failed"
+)
+
+// CompletionChunk is an event type that indicates that the response has been streamed.
+type CompletionChunk struct {
+	// Type is the type of the event.
+	Type string `json:"type"`
+	// SequenceNumber is the sequence number of the event.
+	SequenceNumber int `json:"sequence_number"`
+	// Data is the data associated with the event.
+	Response *Completion `json:"response"`
+	// Raw is the raw data associated with the event. This is useful for debugging purposes.
+	Raw SSEvent `json:"-"`
+}
+
+// CompletionDecoder decodes http responses into [prompts.Completion] values.
+type CompletionDecoder interface {
+	// Decode decodes the response into the value pointed to by v.
+	Decode(resp *http.Response) (*Completion, error)
+}
+
+// CompletionChunksDecoder decodes http responses into [prompts.Completion] values using a streaming approach.
+type CompletionChunksDecoder interface {
+	// Decode decodes the response into the value pointed to by v.
+	Decode(resp *http.Response) iter.Seq2[*CompletionChunk, error]
+}
 
 const maxBufferSize = 512 * 1 * 1000
 
@@ -20,42 +53,23 @@ type ResponseDecoder interface {
 	Decode(resp *http.Response, v any) error
 }
 
-// jsonDecoder decodes http response JSON into a JSON-tagged struct value.
-type jsonDecoder struct{}
+// responsesCompatibilityDecoder decodes http responses into struct values.
+type responsesCompatibilityDecoder struct{}
 
-// NewJSONDecoder returns a ResponseDecoder that decodes JSON responses into struct values.
-func NewJSONDecoder() ResponseDecoder {
-	return jsonDecoder{}
+// NewResponsesCompatibilityDecoder returns a ResponseDecoder that decodes JSON responses into struct values.
+func NewResponsesCompatibilityDecoder() responsesCompatibilityDecoder {
+	return responsesCompatibilityDecoder{}
 }
 
-// Decode decodes the Response Body into the value pointed to by v.
-// Caller must provide a non-nil v and close the resp.Body.
-func (d jsonDecoder) Decode(resp *http.Response, v any) error {
-	return json.NewDecoder(resp.Body).Decode(v)
-}
-
-type byteStreamer struct{}
-
-// NewByteStreamer returns a ResponseDecoder that copies the response body into an [io.Writer] instance.
-func NewByteStreamer() ResponseDecoder {
-	return byteStreamer{}
-}
-
-// Decode simply tries to copy response data into v assuming its an [io.Writer] instance. Assuming so little about v
-// gives consumers a lot of choice about consuming response data. They can wait for all data to be dumped into some
-// buffer then act on it or they can read as soon as data gets written.
-func (d byteStreamer) Decode(resp *http.Response, v any) error {
-	w, ok := v.(io.Writer)
-	if !ok {
-		return fmt.Errorf("expected type: %T; got: %T", w, v)
-	}
-
-	_, err := io.Copy(w, resp.Body)
+// Decode decodes the response to a compatible struct value.
+func (d responsesCompatibilityDecoder) Decode(resp *http.Response) (*Completion, error) {
+	v := &Completion{}
+	err := json.NewDecoder(resp.Body).Decode(&v)
 	if err != nil {
-		return fmt.Errorf("failed copying response data to v: %w", err)
+		return nil, err
 	}
 
-	return nil
+	return v, nil
 }
 
 // SSEvent is an event emitted by the server.
@@ -80,79 +94,74 @@ var (
 // ErrInvalidSequence is returned when the event sequence is invalid.
 var ErrInvalidSequence = fmt.Errorf("invalid event sequence")
 
-type completionEventDecoder struct{}
+type responsesCompatibilityChunksDecoder struct{}
 
-// NewCompletionEventDecoder returns a new SSE decoder.
-func NewCompletionEventDecoder() ResponseDecoder {
-	return &completionEventDecoder{}
+// NewResponsesCompatibilityChunksDecoder returns a ResponseDecoder that decodes JSON responses into struct values.
+func NewResponsesCompatibilityChunksDecoder() responsesCompatibilityChunksDecoder {
+	return responsesCompatibilityChunksDecoder{}
 }
 
-// Decode simply tries to copy response data into v assuming its an [io.Writer] instance. Assuming so little about v
-// gives consumers a lot of choice about consuming response data. They can wait for all data to be dumped into some
-// buffer then act on it or they can read as soon as data gets written.
-func (d completionEventDecoder) Decode(resp *http.Response, v any) error {
-	s, ok := v.(CompletionEventStream)
-	if !ok {
-		return fmt.Errorf("expected type: %T; got: %T", s, v)
-	}
+// Decode is decoding the responses as a stream of completion events.
+func (d responsesCompatibilityChunksDecoder) Decode(resp *http.Response) iter.Seq2[*CompletionChunk, error] {
+	return func(yield func(*CompletionChunk, error) bool) {
+		scanner := bufio.NewScanner(resp.Body)
+		buf := make([]byte, 0, maxBufferSize)
+		scanner.Buffer(buf, maxBufferSize)
 
-	scanner := bufio.NewScanner(resp.Body)
-	buf := make([]byte, 0, maxBufferSize)
-	scanner.Buffer(buf, maxBufferSize)
+		for scanner.Scan() {
+			sseEvent := SSEvent{}
+			payload := scanner.Bytes()
 
-	defer close(s)
-
-	for scanner.Scan() {
-		sseEvent := SSEvent{}
-		payload := scanner.Bytes()
-
-		if len(payload) == 0 {
-			continue
-		}
-
-		// parse line
-		del := bytes.IndexByte(payload, ':')
-		if del == 0 || del < 0 {
-			continue // skip comment
-		}
-
-		field, content := payload[:del], bytes.TrimSpace(payload[del+1:])
-
-		switch {
-		case bytes.EqualFold(field, idField):
-			sseEvent.ID = content
-		case bytes.EqualFold(field, eventField):
-			sseEvent.Event = content
-		case bytes.EqualFold(field, dataField):
-			if sseEvent.Data == nil {
-				sseEvent.Data = make([]byte, 0)
-			} else {
-				sseEvent.Data = append(sseEvent.Data, '\n')
+			if len(payload) == 0 {
+				continue
 			}
-			sseEvent.Data = append(sseEvent.Data, content...)
-		case bytes.EqualFold(field, retryField):
-			sseEvent.Retry = content
+
+			// parse line
+			del := bytes.IndexByte(payload, ':')
+			if del == 0 || del < 0 {
+				continue // skip comment
+			}
+
+			field, content := payload[:del], bytes.TrimSpace(payload[del+1:])
+
+			switch {
+			case bytes.EqualFold(field, idField):
+				sseEvent.ID = content
+			case bytes.EqualFold(field, eventField):
+				sseEvent.Event = content
+			case bytes.EqualFold(field, dataField):
+				if sseEvent.Data == nil {
+					sseEvent.Data = make([]byte, 0)
+				} else {
+					sseEvent.Data = append(sseEvent.Data, '\n')
+				}
+				sseEvent.Data = append(sseEvent.Data, content...)
+			case bytes.EqualFold(field, retryField):
+				sseEvent.Retry = content
+			}
+
+			chunk := &CompletionChunk{
+				Type:     conv.String(sseEvent.Event),
+				Response: nil,
+				Raw:      sseEvent,
+			}
+
+			if !slices.GreaterThen(0, sseEvent.Data...) {
+				continue
+			}
+
+			c := &Completion{}
+			err := json.Unmarshal(sseEvent.Data, &c)
+
+			chunk.Response = c
+
+			if !yield(chunk, err) {
+				return
+			}
 		}
 
-		event := CompletionEvent{Raw: sseEvent}
-		event.Type = conv.String(sseEvent.Event)
-
-		if !slices.GreaterThen(0, sseEvent.Data...) {
-			s <- event
-			continue
+		if err := scanner.Err(); err != nil {
+			yield(nil, err)
 		}
-
-		err := json.Unmarshal(sseEvent.Data, &event.Response)
-		if err != nil {
-			return err
-		}
-
-		s <- event
 	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	return nil
 }

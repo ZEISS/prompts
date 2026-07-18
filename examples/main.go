@@ -13,6 +13,7 @@ import (
 // It then sends the request to the API and prints the last completion content.
 func main() {
 	client := prompts.NewClient(os.Getenv("OLLAMA_URL"))
+	client.APIKey(os.Getenv("OLLAMA_KEY"))
 	provider := ollama.New(client)
 
 	msgs := []prompts.Input{
@@ -21,7 +22,7 @@ func main() {
 			Content: []prompts.MessageContent{
 				{
 					Content: prompts.MessageContentText{
-						Text: "You are a helpful assistant. You answer questions to the best of your ability.",
+						Text: "You are a helpful assistant. You answer questions short and to the point. You are concise and to the point.",
 					},
 				},
 			},
@@ -38,22 +39,17 @@ func main() {
 		},
 	}
 
-	stream := prompts.NewCompletionEventStream()
-
-	go func() {
-		for event := range stream {
-			fmt.Println(event.Type)
-		}
-	}()
-
 	prompt := prompts.NewPrompt(
-		prompts.WithModel(ollama.DefaultModel),
+		prompts.WithModel("gemma4:cloud"),
 		prompts.WithInput(msgs...),
 		prompts.WithStream(),
 	)
 
-	err := provider.AsStream(context.Background(), prompt, stream)
-	if err != nil {
-		panic(err)
+	stream := provider.CompleteChunked(context.Background(), prompt)
+	for event, err := range stream {
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("%s", event.Raw.Data)
 	}
 }
