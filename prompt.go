@@ -3,6 +3,8 @@ package prompts
 import (
 	"encoding/base64"
 	"encoding/json"
+
+	"github.com/katallaxie/pkg/utilx"
 )
 
 type ToolChoice string
@@ -25,7 +27,32 @@ type Tool struct {
 	Tool isCompletionTool
 }
 
-func (c Tool) isCompletionTool() {}
+func (t Tool) isCompletionTool() {}
+
+// GetTool returns the tool for the chat completion request.
+func (t *Tool) GetTool() isCompletionTool {
+	if utilx.NotNil(t) {
+		return t.Tool
+	}
+
+	return nil
+}
+
+// GetFunctionTool returns the function tool for the chat completion request.
+func (t *Tool) GetFunctionTool() *FunctionTool {
+	if t, ok := t.GetTool().(*FunctionTool); ok {
+		return t
+	}
+	return nil
+}
+
+// GetCustomTool returns the custom tool for the chat completion request.
+func (t *Tool) GetCustomTool() *CustomTool {
+	if t, ok := t.GetTool().(*CustomTool); ok {
+		return t
+	}
+	return nil
+}
 
 // MarshalJSON marshals the response tool into JSON.
 func (c Tool) MarshalJSON() ([]byte, error) {
@@ -41,7 +68,9 @@ type FunctionTool struct {
 // MarshalJSON marshals the response function tool into JSON.
 func (c FunctionTool) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
+		// Type is the type of the tool.
 		Type string `json:"type"`
+		// Name is the name of the function.
 		Name string `json:"name,omitempty"`
 		// Description is the description of the function.
 		Description string `json:"description,omitempty"`
@@ -70,7 +99,7 @@ type FunctionDefinition struct {
 	Strict bool `json:"strict,omitempty"`
 }
 
-func (c FunctionTool) isCompletionTool() {}
+func (c *FunctionTool) isCompletionTool() {}
 
 // FunctionProperties represents the properties for the function tool.
 type FunctionProperties map[string]json.RawMessage
@@ -121,7 +150,7 @@ type CustomDefinition struct {
 	Description string `json:"description,omitempty"`
 }
 
-func (c CustomTool) isCompletionTool() {}
+func (c *CustomTool) isCompletionTool() {}
 
 // MessageContent is the content of a response message.
 type MessageContent struct {
