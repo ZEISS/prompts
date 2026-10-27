@@ -14,7 +14,7 @@ tool (
 require (
 	github.com/google/go-querystring v1.2.0
 	github.com/katallaxie/pkg v0.7.11
-	github.com/nats-io/nats.go v1.54.0
+	github.com/nats-io/nats.go v1.55.0
 	github.com/stretchr/testify v1.12.1
 )
 
